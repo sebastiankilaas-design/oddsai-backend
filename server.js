@@ -19,44 +19,56 @@ const LEAGUE_IDS = {
 
 app.get("/", (req, res) => res.json({ status: "OddsAI backend kjører!" }));
 
+async function fetchFromFootballAPI(url) {
+  const res = await fetch(url, { headers: { "x-apisports-key": FOOTBALL_API_KEY } });
+  return res.json();
+}
+
 app.get("/fixtures", async (req, res) => {
   const { league } = req.query;
   const leagueId = LEAGUE_IDS[league];
   if (!leagueId) return res.status(400).json({ error: "Ukjent liga" });
 
-  const today = new Date();
-  const nextWeek = new Date();
-  nextWeek.setDate(today.getDate() + 7);
-  const from = today.toISOString().split("T")[0];
-  const to = nextWeek.toISOString().split("T")[0];
-
   try {
-    let response = await fetch(
-      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2024&from=${from}&to=${to}&status=NS`,
-      { headers: { "x-apisports-key": FOOTBALL_API_KEY } }
+    // Best approach: just ask for next 5 upcoming — API picks correct season automatically
+    let data = await fetchFromFootballAPI(
+      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&next=5`
     );
-    let data = await response.json();
 
+    // Fallback: season 2025 (current for most leagues in April 2026)
     if (!data.response || data.response.length === 0) {
-      response = await fetch(
-        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2024&status=NS&next=5`,
-        { headers: { "x-apisports-key": FOOTBALL_API_KEY } }
+      data = await fetchFromFootballAPI(
+        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&next=5`
       );
-      data = await response.json();
     }
 
-    const fixtures = (data.response || []).slice(0, 5).map((f) => {
+    // Last fallback: season 2026 for leagues that started in 2026
+    if (!data.response || data.response.length === 0) {
+      data = await fetchFromFootballAPI(
+        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2026&next=5`
+      );
+    }
+
+    if (!data.response || data.response.length === 0) {
+      return res.json([]);
+    }
+
+    const fixtures = data.response.slice(0, 5).map((f) => {
       const date = new Date(f.fixture.date);
       const dayName = date.toLocaleDateString("no-NO", { weekday: "short" });
       const time = date.toLocaleTimeString("no-NO", { hour: "2-digit", minute: "2-digit" });
       return {
         id: f.fixture.id,
+        homeId: f.teams.home.id,
+        awayId: f.teams.away.id,
         home: f.teams.home.name,
         away: f.teams.away.name,
         homeLogo: f.teams.home.logo,
         awayLogo: f.teams.away.logo,
         time: `${dayName} ${time}`,
         venue: f.fixture.venue?.name || "",
+        leagueId: f.league.id,
+        season: f.league.season,
       };
     });
 
@@ -66,13 +78,11 @@ app.get("/fixtures", async (req, res) => {
   }
 });
 
-async function getTeamForm(teamId, leagueId) {
+async function getTeamForm(teamId, leagueId, season) {
   try {
-    const res = await fetch(
-      `https://v3.football.api-sports.io/teams/statistics?team=${teamId}&league=${leagueId}&season=2024`,
-      { headers: { "x-apisports-key": FOOTBALL_API_KEY } }
+    const data = await fetchFromFootballAPI(
+      `https://v3.football.api-sports.io/teams/statistics?team=${teamId}&league=${leagueId}&season=${season}`
     );
-    const data = await res.json();
     const s = data.response;
     if (!s) return null;
     const form = (s.form || "").slice(-5);
@@ -89,13 +99,11 @@ async function getTeamForm(teamId, leagueId) {
 
 async function getH2H(homeId, awayId) {
   try {
-    const res = await fetch(
-      `https://v3.football.api-sports.io/fixtures/headtohead?h2h=${homeId}-${awayId}&last=5`,
-      { headers: { "x-apisports-key": FOOTBALL_API_KEY } }
+    const data = await fetchFromFootballAPI(
+      `https://v3.football.api-sports.io/fixtures/headtohead?h2h=${homeId}-${awayId}&last=5`
     );
-    const data = await res.json();
     const matches = data.response || [];
-    if (matches.length === 0) return "Ingen H2H-data";
+    if (matches.length === 0) return "Ingen H2H-data tilgjengelig";
     let hw = 0, aw = 0, d = 0;
     matches.forEach((m) => {
       const hg = m.score.fulltime.home;
@@ -112,11 +120,9 @@ async function getH2H(homeId, awayId) {
 
 async function getInjuries(fixtureId, teamId) {
   try {
-    const res = await fetch(
-      `https://v3.football.api-sports.io/injuries?fixture=${fixtureId}`,
-      { headers: { "x-apisports-key": FOOTBALL_API_KEY } }
+    const data = await fetchFromFootballAPI(
+      `https://v3.football.api-sports.io/injuries?fixture=${fixtureId}`
     );
-    const data = await res.json();
     const list = (data.response || []).filter((p) => p.team.id === teamId);
     if (list.length === 0) return "Ingen kjente skader";
     return list.slice(0, 3).map((p) => `${p.player.name} (${p.player.reason})`).join(", ");
@@ -124,18 +130,17 @@ async function getInjuries(fixtureId, teamId) {
 }
 
 app.post("/analyze", async (req, res) => {
-  const { home, away, league, odds, time, market, fixtureId, homeId, awayId } = req.body;
+  const { home, away, league, odds, time, market, fixtureId, homeId, awayId, leagueId, season } = req.body;
   if (!home || !away || !league || !odds || !market) {
     return res.status(400).json({ error: "Mangler felter" });
   }
 
-  const leagueId = LEAGUE_IDS[league];
   let homeForm = null, awayForm = null, h2h = "Ikke hentet", homeInj = "Ikke tilgjengelig", awayInj = "Ikke tilgjengelig";
 
-  if (fixtureId && homeId && awayId && leagueId) {
+  if (fixtureId && homeId && awayId && leagueId && season) {
     [homeForm, awayForm, h2h, homeInj, awayInj] = await Promise.all([
-      getTeamForm(homeId, leagueId),
-      getTeamForm(awayId, leagueId),
+      getTeamForm(homeId, leagueId, season),
+      getTeamForm(awayId, leagueId, season),
       getH2H(homeId, awayId),
       getInjuries(fixtureId, homeId),
       getInjuries(fixtureId, awayId),
@@ -144,10 +149,10 @@ app.post("/analyze", async (req, res) => {
 
   const homeFormStr = homeForm
     ? `Form siste 5: ${homeForm.form} | Snitt mål: ${homeForm.goalsPerGame} | Snitt sluppet inn: ${homeForm.goalsAgainstPerGame}`
-    : "Ingen formdata";
+    : "Ingen formdata tilgjengelig";
   const awayFormStr = awayForm
     ? `Form siste 5: ${awayForm.form} | Snitt mål: ${awayForm.goalsPerGame} | Snitt sluppet inn: ${awayForm.goalsAgainstPerGame}`
-    : "Ingen formdata";
+    : "Ingen formdata tilgjengelig";
 
   const prompt = `Du er verdens beste fotballanalytiker. Analyser kampen for markedet "${market}".
 
@@ -171,7 +176,7 @@ Svar KUN med JSON (ingen markdown):
   "analysis": "2-4 setninger på norsk",
   "form_home": "Vurdering ${home}",
   "form_away": "Vurdering ${away}",
-  "injuries": "Skadeoppsummering",
+  "injuries": "Skadeoppsummering begge lag",
   "rotation_risk": "Lav/Middels/Høy — begrunnelse",
   "h2h": "Historikk-oppsummering",
   "value": "Ja/Nei og kort begrunnelse"
