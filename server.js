@@ -17,36 +17,38 @@ const LEAGUE_IDS = {
   "Champions League": 2,
 };
 
+// Most leagues in April 2026: PL/LaLiga/Bundesliga/Serie A = season 2025, Eliteserien = season 2026
+const LEAGUE_SEASON = {
+  "Premier League": 2025,
+  "La Liga": 2025,
+  "Bundesliga": 2025,
+  "Serie A": 2025,
+  "Eliteserien": 2026,
+  "Champions League": 2025,
+};
+
 app.get("/", (req, res) => res.json({ status: "OddsAI backend kjører!" }));
 
-async function fetchFromFootballAPI(url) {
-  const res = await fetch(url, { headers: { "x-apisports-key": FOOTBALL_API_KEY } });
+async function footballAPI(path) {
+  const res = await fetch(`https://v3.football.api-sports.io${path}`, {
+    headers: { "x-apisports-key": FOOTBALL_API_KEY }
+  });
   return res.json();
 }
 
 app.get("/fixtures", async (req, res) => {
   const { league } = req.query;
   const leagueId = LEAGUE_IDS[league];
+  const season = LEAGUE_SEASON[league];
   if (!leagueId) return res.status(400).json({ error: "Ukjent liga" });
 
   try {
-    // Best approach: just ask for next 5 upcoming — API picks correct season automatically
-    let data = await fetchFromFootballAPI(
-      `https://v3.football.api-sports.io/fixtures?league=${leagueId}&next=5`
-    );
+    // First try: next 5 upcoming in correct season
+    let data = await footballAPI(`/fixtures?league=${leagueId}&season=${season}&next=5`);
 
-    // Fallback: season 2025 (current for most leagues in April 2026)
+    // Fallback: just next 5 without season (API auto-detects)
     if (!data.response || data.response.length === 0) {
-      data = await fetchFromFootballAPI(
-        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2025&next=5`
-      );
-    }
-
-    // Last fallback: season 2026 for leagues that started in 2026
-    if (!data.response || data.response.length === 0) {
-      data = await fetchFromFootballAPI(
-        `https://v3.football.api-sports.io/fixtures?league=${leagueId}&season=2026&next=5`
-      );
+      data = await footballAPI(`/fixtures?league=${leagueId}&next=5`);
     }
 
     if (!data.response || data.response.length === 0) {
@@ -80,9 +82,7 @@ app.get("/fixtures", async (req, res) => {
 
 async function getTeamForm(teamId, leagueId, season) {
   try {
-    const data = await fetchFromFootballAPI(
-      `https://v3.football.api-sports.io/teams/statistics?team=${teamId}&league=${leagueId}&season=${season}`
-    );
+    const data = await footballAPI(`/teams/statistics?team=${teamId}&league=${leagueId}&season=${season}`);
     const s = data.response;
     if (!s) return null;
     const form = (s.form || "").slice(-5);
@@ -99,9 +99,7 @@ async function getTeamForm(teamId, leagueId, season) {
 
 async function getH2H(homeId, awayId) {
   try {
-    const data = await fetchFromFootballAPI(
-      `https://v3.football.api-sports.io/fixtures/headtohead?h2h=${homeId}-${awayId}&last=5`
-    );
+    const data = await footballAPI(`/fixtures/headtohead?h2h=${homeId}-${awayId}&last=5`);
     const matches = data.response || [];
     if (matches.length === 0) return "Ingen H2H-data tilgjengelig";
     let hw = 0, aw = 0, d = 0;
@@ -120,9 +118,7 @@ async function getH2H(homeId, awayId) {
 
 async function getInjuries(fixtureId, teamId) {
   try {
-    const data = await fetchFromFootballAPI(
-      `https://v3.football.api-sports.io/injuries?fixture=${fixtureId}`
-    );
+    const data = await footballAPI(`/injuries?fixture=${fixtureId}`);
     const list = (data.response || []).filter((p) => p.team.id === teamId);
     if (list.length === 0) return "Ingen kjente skader";
     return list.slice(0, 3).map((p) => `${p.player.name} (${p.player.reason})`).join(", ");
