@@ -1,12 +1,9 @@
 const express = require("express");
 const cors = require("cors");
-const Anthropic = require("@anthropic-ai/sdk");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Health check
 app.get("/", (req, res) => res.json({ status: "OddsAI backend kjører!" }));
@@ -52,20 +49,24 @@ Svar KUN med JSON (ingen markdown, ingen tekst utenfor JSON):
 }`;
 
   try {
-    const message = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 800,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: prompt }],
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 800,
+        temperature: 0.7
+      })
     });
 
-    const text = message.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("")
-      .replace(/```json|```/g, "")
-      .trim();
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
 
+    const text = data.choices[0].message.content.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(text);
     res.json(parsed);
   } catch (err) {
